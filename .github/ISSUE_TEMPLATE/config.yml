@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 下载最新版本
+    url: https://github.com/diave971/IThome-For-WinUI/releases/latest
+    about: 安装包与更新说明都在 Releases 中，本仓库不接受源码贡献。
+  - name: 提问与讨论
+    url: https://github.com/diave971/IThome-For-WinUI/discussions
+    about: 使用疑问、经验交流请走 Discussions，issue 用于可复现的缺陷与功能建议。

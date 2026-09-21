@@ -1,0 +1,439 @@
+name: 发布 / Windows 构建
+
+# 本仓库只负责调度、构建与发布；核心源码在运行时从私有仓库只读检出，
+# 不会提交到本仓库。详见 README「关于源码」。
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "私有源码仓的分支 / Tag / Commit"
+        required: true
+        default: "master"
+        type: string
+      version_override:
+        description: "覆盖版本号（留空则读取 Package.appxmanifest 的 Identity/@Version）"
+        required: false
+        default: ""
+        type: string
+      platforms:
+        description: "逗号分隔的平台"
+        required: true
+        default: "x64"
+        type: choice
+        options:
+          - "x64"
+          - "ARM64"
+          - "x64,ARM64"
+      publish_release:
+        description: "创建 / 更新 GitHub Release（关闭则只产出 Actions 工件）"
+        required: true
+        default: true
+        type: boolean
+      prerelease:
+        description: "标记为预发布（预发布不会成为 latest）"
+        required: true
+        default: false
+        type: boolean
+      publish_unsigned_msix:
+        description: "未配置签名证书时仍产出未签名 MSIX（该产物无法直接安装，仅供排查）"
+        required: true
+        default: false
+        type: boolean
+      release_notes:
+        description: "补充发布说明（可选，每行一项要点）"
+        required: false
+        default: ""
+        type: string
+
+# 同一时间只跑一个发布流程，避免并发写 Release 冲突
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  PRIVATE_SOURCE_REPOSITORY: "diave971/it-home-winui"
+  PRIVATE_SOURCE_PATH: "private-src"
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  build:
+    name: 构建发布产物
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: 检出发布仓库
+        uses: actions/checkout@v4
+
+      - name: 校验私有源码只读令牌
+        shell: pwsh
+        env:
+          PRIVATE_SOURCE_TOKEN: ${{ secrets.PRIVATE_SOURCE_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PRIVATE_SOURCE_TOKEN)) {
+            Write-Host "::error::缺少仓库 Secret: PRIVATE_SOURCE_TOKEN"
+            Write-Host "请创建 fine-grained PAT（仅需对 $env:PRIVATE_SOURCE_REPOSITORY 的 Contents: Read 权限），"
+            Write-Host "并在 Settings → Secrets and variables → Actions 中保存为 PRIVATE_SOURCE_TOKEN。"
+            exit 1
+          }
+          Write-Host "私有源码令牌已配置。"
+
+      - name: 检出私有源码（只读）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_SOURCE_REPOSITORY }}
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.PRIVATE_SOURCE_TOKEN }}
+          path: ${{ env.PRIVATE_SOURCE_PATH }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: 记录源码提交
+        id: source
+        shell: pwsh
+        run: |
+          $sha = (git -C "$env:PRIVATE_SOURCE_PATH" rev-parse HEAD).Trim()
+          $short = $sha.Substring(0, 8)
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          "short=$short" >> $env:GITHUB_OUTPUT
+          # 只回显 SHA 前缀，不回显提交说明：公开仓的运行日志任何人可见，
+          # 而私有源码仓的提交说明可能包含尚未公开的功能或修复描述。
+          Write-Host "源码提交: $short"
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          # 源码仓 global.json 要求 10.0.301 且 rollForward=latestFeature。
+          # 显式安装 10.0.4xx 特性带，避免 runner 自带 SDK 版本不满足而还原失败。
+          dotnet-version: "10.0.x"
+          dotnet-quality: "ga"
+
+      - name: 显示构建环境
+        shell: pwsh
+        run: |
+          dotnet --version
+          dotnet --list-sdks
+          Write-Host "runner: $env:RUNNER_IMAGE_OS $env:RUNNER_IMAGE_VERSION"
+
+      - name: 校验源码 SDK 约束可满足
+        shell: pwsh
+        run: |
+          $globalJson = Join-Path "$env:PRIVATE_SOURCE_PATH" "ITHome_For_WinUI/global.json"
+          if (-not (Test-Path $globalJson)) {
+            Write-Host "未找到 global.json，跳过 SDK 约束校验。"
+            exit 0
+          }
+          $required = (Get-Content $globalJson -Raw | ConvertFrom-Json).sdk.version
+          Write-Host "global.json 要求 SDK: $required"
+
+          Push-Location (Join-Path "$env:PRIVATE_SOURCE_PATH" "ITHome_For_WinUI")
+          try {
+            $resolved = (dotnet --version).Trim()
+          }
+          finally { Pop-Location }
+
+          if ($LASTEXITCODE -ne 0) { throw "dotnet --version 失败，global.json 约束无法满足" }
+          Write-Host "实际解析到 SDK: $resolved"
+
+      - name: 准备签名证书
+        id: cert
+        shell: pwsh
+        env:
+          CERT_PFX_BASE64: ${{ secrets.SIGNING_CERT_PFX_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PFX_PASSWORD }}
+        run: |
+          $hasCert = -not [string]::IsNullOrWhiteSpace($env:CERT_PFX_BASE64)
+          if (-not $hasCert) {
+            Write-Host "::warning::未配置 SIGNING_CERT_PFX_BASE64，MSIX 将无法签名。"
+            Write-Host "若需要签名产物，请配置以下两个 Secret："
+            Write-Host "  SIGNING_CERT_PFX_BASE64   —— PFX 文件的 Base64 编码"
+            Write-Host "  SIGNING_CERT_PFX_PASSWORD —— PFX 导出密码"
+            "available=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+
+          $certDir = Join-Path $env:RUNNER_TEMP "signing"
+          New-Item -ItemType Directory -Force -Path $certDir | Out-Null
+          $pfxPath = Join-Path $certDir "signing.pfx"
+          [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CERT_PFX_BASE64))
+
+          $secure = ConvertTo-SecureString -String $env:SIGNING_CERT_PASSWORD -Force -AsPlainText
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $secure)
+          Write-Host "证书主题: $($cert.Subject)"
+          Write-Host "有效期至: $($cert.NotAfter)"
+
+          # 导出 .cer 供用户装入受信任根存储，随 Release 一并提供
+          $cerPath = Join-Path $certDir "ITHomeWinUI-signing.cer"
+          [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+
+          "available=true" >> $env:GITHUB_OUTPUT
+          "pfx=$pfxPath" >> $env:GITHUB_OUTPUT
+          "cer=$cerPath" >> $env:GITHUB_OUTPUT
+          "subject=$($cert.Subject)" >> $env:GITHUB_OUTPUT
+
+      - name: 构建产物
+        shell: pwsh
+        env:
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PFX_PASSWORD }}
+          PLATFORMS_INPUT: ${{ inputs.platforms }}
+          VERSION_OVERRIDE: ${{ inputs.version_override }}
+        run: |
+          $platforms = $env:PLATFORMS_INPUT.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+          # 注意：不要用 $args —— 它是 PowerShell 自动变量。
+          $pwshArgs = @(
+            "-NoProfile", "-File", "scripts/Build-Release.ps1",
+            "-SourceRoot", "$env:PRIVATE_SOURCE_PATH",
+            "-Platforms", ($platforms -join ","),
+            "-OutputDir", "release-output"
+          )
+          if (-not [string]::IsNullOrWhiteSpace($env:VERSION_OVERRIDE)) {
+            $pwshArgs += @("-Version", $env:VERSION_OVERRIDE)
+          }
+
+          $certAvailable = "${{ steps.cert.outputs.available }}" -eq "true"
+          $unsignedMsix = "${{ inputs.publish_unsigned_msix }}" -eq "true"
+
+          if ($certAvailable) {
+            # 密码不通过命令行传递：命令行参数会出现在进程列表中，且回显到日志。
+            # 改由 SIGNING_CERT_PASSWORD 环境变量下传，脚本内部读取。
+            $pwshArgs += @("-CertificatePath", "${{ steps.cert.outputs.pfx }}")
+          }
+          elseif (-not $unsignedMsix) {
+            Write-Host "未配置证书且未勾选未签名 MSIX，跳过 MSIX 构建。"
+            $pwshArgs += "-SkipMsix"
+          }
+
+          # 回显时剔除任何形如 -CertificatePassword <值> 的片段，避免凭据进日志
+          $redacted = ($pwshArgs -join ' ') -replace '(?i)(-CertificatePassword\s+)\S+', '$1***'
+          Write-Host "执行: pwsh $redacted"
+          & pwsh @pwshArgs
+          if ($LASTEXITCODE -ne 0) { throw "构建脚本失败，退出码 $LASTEXITCODE" }
+
+      - name: 校验绿色版包内容
+        shell: pwsh
+        run: |
+          $zips = @(Get-ChildItem "release-output" -Recurse -Filter "*-portable.zip" -File)
+          if ($zips.Count -eq 0) { throw "未生成绿色版压缩包" }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $required = @(
+            "ITHomeWinUI/ITHomeWinUI.exe",
+            "ITHomeWinUI/ITHomeWinUI.exe.manifest",
+            "ITHomeWinUI/Assets/ArticleTemplate",
+            "ITHomeWinUI/Assets/Emotion",
+            "ITHomeWinUI/Assets/Nav",
+            "ITHomeWinUI/Assets/Quan",
+            "ITHomeWinUI/Assets/Hls",
+            "ITHomeWinUI/Assets/VideoOverlay"
+          )
+
+          foreach ($zip in $zips) {
+            Write-Host "校验 $($zip.Name)"
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+            try {
+              $names = $archive.Entries | ForEach-Object { $_.FullName }
+            }
+            finally { $archive.Dispose() }
+
+            $missing = @()
+            foreach ($item in $required) {
+              $hit = if ($item -match "\.[a-z]+$") { $names -contains $item }
+                     else { @($names | Where-Object { $_ -like "$item/*" }).Count -gt 0 }
+              if (-not $hit) { $missing += $item }
+            }
+            if ($missing.Count -gt 0) {
+              throw "$($zip.Name) 缺少必需内容: $($missing -join ', ')"
+            }
+            Write-Host "  通过：$($names.Count) 个条目，必需内容齐全。"
+          }
+
+      - name: 汇总产物
+        id: artifacts
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem "release-output" -Recurse -File |
+            Where-Object { $_.Name -notlike "release-summary.json" -and $_.Extension -ne ".json" })
+          $names = ($files | ForEach-Object { $_.Name }) -join ", "
+          Write-Host "产物: $names"
+          "list=$names" >> $env:GITHUB_OUTPUT
+          "count=$($files.Count)" >> $env:GITHUB_OUTPUT
+
+      # 安全说明：GitHub 不支持「公开仓的私有工件」——公开仓库中上传的
+      # artifacts 对任何已登录的 GitHub 用户均可下载。因此只在本次确实要
+      # 发版（publish_release=true）时才上传安装包；试跑（false）不留工件，
+      # 避免未发布的构建产物在维护者不知情时对外流通。
+      # 需要在发版前验证产物时，请改用本地构建（维护手册在私有源码仓）。
+      - name: 上传 Actions 工件
+        if: ${{ inputs.publish_release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ inputs.source_ref }}-${{ github.run_number }}
+          path: |
+            release-output/**/*.zip
+            release-output/**/*.msix
+            release-output/**/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: 断言：试跑不上传安装包
+        if: ${{ !inputs.publish_release }}
+        shell: pwsh
+        run: |
+          Write-Host "本次 publish_release=false（试跑），按要求不上传安装包工件。"
+          Get-ChildItem "release-output" -Recurse -File |
+            Where-Object { $_.Extension -in @('.zip', '.msix') } |
+            ForEach-Object { Write-Host ("  已就地验证未上传: {0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB)) }
+
+      - name: 组装 Release 附件
+        if: ${{ inputs.publish_release }}
+        shell: pwsh
+        run: |
+          $stage = "release-assets"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # 注意：PowerShell 不会展开 "**"，必须用 Get-ChildItem 递归收集。
+          Get-ChildItem "release-output" -Recurse -File |
+            Where-Object { $_.Extension -in @(".zip", ".msix") -or $_.Name -eq "SHA256SUMS.txt" } |
+            ForEach-Object { Copy-Item $_.FullName $stage -Force }
+
+          $certAvailable = "${{ steps.cert.outputs.available }}" -eq "true"
+          if ($certAvailable) {
+            Copy-Item "${{ steps.cert.outputs.cer }}" $stage -Force
+          }
+
+          Get-ChildItem $stage | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize
+
+      - name: 生成发布说明
+        if: ${{ inputs.publish_release }}
+        shell: pwsh
+        env:
+          RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
+        run: |
+          # 平台数量可变，不能硬编码 x64 路径。
+          $summaryFile = Get-ChildItem "release-output" -Recurse -Filter "release-summary.json" -File |
+            Select-Object -First 1
+          if (-not $summaryFile) { throw "未找到 release-summary.json" }
+          $version = (Get-Content $summaryFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json).version
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "无法读取版本号" }
+
+          $certAvailable = "${{ steps.cert.outputs.available }}" -eq "true"
+          $hasMsix = @(Get-ChildItem "release-assets" -Filter "*.msix" -File).Count -gt 0
+
+          $lines = @()
+          $lines += "## IT之家 WinUI 3 客户端 $version"
+          $lines += ""
+          $lines += "基于 Windows App SDK / WinUI 3 的第三方 IT之家 Windows 桌面客户端。"
+          $lines += ""
+
+          # 用户输入经环境变量传入，避免多行内容破坏脚本结构。
+          $notes = if ($env:RELEASE_NOTES_INPUT) { $env:RELEASE_NOTES_INPUT.Trim() } else { "" }
+          if ($notes) {
+            $lines += "### 本次更新"
+            $lines += ""
+            foreach ($item in ($notes -split "`r?`n")) {
+              if ($item.Trim()) { $lines += "- $($item.Trim())" }
+            }
+            $lines += ""
+          }
+
+          $lines += "### 下载选择"
+          $lines += ""
+          $lines += "| 安装方式 | 文件 | 说明 |"
+          $lines += "| --- | --- | --- |"
+          $lines += "| 绿色版（推荐） | ``*-portable.zip`` | 解压后直接运行 ``ITHomeWinUI.exe``，无需安装任何依赖 |"
+          if ($hasMsix) {
+            $lines += "| MSIX 安装版 | ``*.msix`` | 需先信任随附的 ``ITHomeWinUI-signing.cer`` 证书，再双击安装 |"
+          }
+          $lines += ""
+
+          if ($certAvailable) {
+            $lines += "### MSIX 安装步骤"
+            $lines += ""
+            $lines += "1. 下载 ``ITHomeWinUI-signing.cer``，双击 → 「安装证书」"
+            $lines += "2. 存储位置选 **本地计算机** → 放入 **受信任的根证书颁发机构**"
+            $lines += "3. 双击 ``.msix`` 完成安装"
+            $lines += ""
+            $lines += "> 跳过第 2 步会导致安装因证书链错误失败。"
+            $lines += ""
+          }
+          elseif ($hasMsix) {
+            $lines += "> **注意**：本次 MSIX 未签名，无法直接安装，仅供排查使用。请改用绿色版。"
+            $lines += ""
+          }
+
+          $lines += "### 完整性校验"
+          $lines += ""
+          $lines += "所有附件均已在 ``SHA256SUMS.txt`` 中列出哈希，可用以下命令核对："
+          $lines += ""
+          $lines += '```powershell'
+          $lines += 'Get-FileHash .\ITHomeWinUI-*-portable.zip -Algorithm SHA256'
+          $lines += '```'
+          $lines += ""
+          $lines += "### 系统要求"
+          $lines += ""
+          $lines += "- Windows 10 版本 1809（17763）或更高，x64 / ARM64"
+          $lines += "- 无需额外安装运行时（自包含发布）"
+          $lines += "- 若文章页空白，请安装 WebView2 运行时"
+          $lines += ""
+          $lines += "应用未做商业代码签名，首次运行可能出现 SmartScreen 提示，选择「更多信息」→「仍要运行」。"
+          $lines += ""
+          $lines += "---"
+          $lines += ""
+          $lines += "构建自提交 ``${{ steps.source.outputs.short }}``。"
+          $lines += "遇到问题请[提交 issue](https://github.com/diave971/IThome-For-WinUI/issues/new/choose)。"
+
+          $lines | Set-Content "release-notes.md" -Encoding UTF8
+          "version=$version" >> $env:GITHUB_OUTPUT
+        id: notes
+
+      - name: 发布 Release
+        if: ${{ inputs.publish_release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.notes.outputs.version }}"
+          $tag = "v$version"
+
+          # GitHub Actions 会在脚本前注入 $ErrorActionPreference='stop'。
+          # PowerShell 7.4+ 另有 $PSNativeCommandUseErrorActionPreference 控制
+          # 「原生命令非零退出是否视为终止错误」，其默认值随版本/环境而异。
+          # 下面显式关闭，确保 `gh release view`（tag 不存在时退出码 1）只写
+          # $LASTEXITCODE 而不中断脚本——否则首次发版必然失败。
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $createArgs = @(
+            "release", "create", $tag,
+            "--title", "IT之家 WinUI 3 客户端 $version",
+            "--notes-file", "release-notes.md",
+            "--target", "${{ github.sha }}"
+          )
+          if ("${{ inputs.prerelease }}" -eq "true") { $createArgs += "--prerelease" }
+
+          $assets = @(Get-ChildItem "release-assets" -File | ForEach-Object { $_.FullName })
+
+          # 已存在同 tag 则更新说明与附件，避免重复发版时失败
+          $exists = $false
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { $exists = $true }
+
+          if ($exists) {
+            Write-Host "Release $tag 已存在，更新说明与附件。"
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "更新 Release 附件失败，退出码 $LASTEXITCODE" }
+            gh release edit $tag --notes-file "release-notes.md" --title "IT之家 WinUI 3 客户端 $version"
+            if ($LASTEXITCODE -ne 0) { throw "更新 Release 说明失败，退出码 $LASTEXITCODE" }
+            if ("${{ inputs.prerelease }}" -eq "true") { gh release edit $tag --prerelease }
+          }
+          else {
+            Write-Host "创建新 Release: $tag"
+            gh @createArgs @assets
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败，退出码 $LASTEXITCODE" }
+          }
+
+          Write-Host ""
+          Write-Host "发布完成: https://github.com/${{ github.repository }}/releases/tag/$tag" -ForegroundColor Green

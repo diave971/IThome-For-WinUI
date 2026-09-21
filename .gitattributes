@@ -1,0 +1,13 @@
+# 统一换行符，避免 Windows 检出导致 YAML/脚本产生无意义 diff
+* text=auto eol=lf
+
+# PowerShell 脚本保持 LF（pwsh 两者均可，统一即可）
+*.ps1 text eol=lf
+
+# 二进制
+*.pfx binary
+*.cer binary
+*.msix binary
+*.zip binary
+*.png binary
+*.ico binary

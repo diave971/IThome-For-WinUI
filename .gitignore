@@ -1,0 +1,17 @@
+# 构建产物
+release-output/
+release-assets/
+release-notes.md
+*.msix
+*.msixbundle
+
+# 证书与密钥：绝不入库
+*.pfx
+*.cer
+*.p12
+
+# 本地环境
+.vs/
+.idea/
+*.user
+*.log

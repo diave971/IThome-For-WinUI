@@ -1,0 +1,116 @@
+name: Bug 报告
+description: 报告崩溃、功能异常或显示问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。提交前请先在 [issues 列表](https://github.com/diave971/IThome-For-WinUI/issues) 中搜索是否已有相同问题。
+        请尽量填写完整信息，缺少版本号与复现步骤的报告很难被定位。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索过既有 issue，确认没有重复
+          required: true
+        - label: 我使用的是从本仓库 Releases 下载的最新版本
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 应用版本号
+      description: 在「设置 → 关于」中查看，或使用 Release 标题中的版本（如 2.2609.18.0）
+      placeholder: "2.2609.18.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: 安装方式
+      options:
+        - 绿色版（portable zip）
+        - MSIX 安装版
+        - 其他 / 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: 系统版本
+      description: "Win + R 输入 winver 查看，例如：Windows 11 24H2 (26100.1742)"
+      placeholder: "Windows 11 24H2 (26100.1742)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: theme
+    attributes:
+      label: 主题
+      options:
+        - 浅色
+        - 深色
+        - 跟随系统
+        - 不确定
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请按顺序写清每一步操作，越具体越好
+      placeholder: |
+        1. 打开应用，进入「圈子」
+        2. 切换到「Wide」布局
+        3. 鼠标悬停在 ...
+        4. 出现 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: 我以为会 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      placeholder: 实际却 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或录屏
+      description: 直接拖拽图片到此处即可。**请自行打码账号、昵称、头像等个人信息**
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 崩溃日志（如适用）
+      description: |
+        若应用崩溃，日志位于 `%LocalAppData%\ITHomeWinUI\crash.log`。
+        **提交前请先检查并删除其中的账号、Cookie、路径等隐私信息**，再粘贴相关片段。
+        也可把文件拖拽到此处上传。
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 任何你认为有助于定位问题的线索，例如是否必现、是否与网络环境有关
+    validations:
+      required: false
