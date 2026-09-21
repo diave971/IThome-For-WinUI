@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <!-- Windows 11 风格漫反射微投影 -->
+    <filter id="fluent-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#800D12" flood-opacity="0.32" />
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.14" />
+    </filter>
+
+    <!-- 红色主体微渐变（模拟顶部主光源） -->
+    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#E83338" />
+      <stop offset="60%" stop-color="#D01E24" />
+      <stop offset="100%" stop-color="#A81218" />
+    </linearGradient>
+
+    <!-- Fluent 顶部微光边缘反光 -->
+    <linearGradient id="edge-highlight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.4" />
+      <stop offset="40%" stop-color="#FFFFFF" stop-opacity="0.1" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- 字母 IT 的极弱下沉微投影 -->
+    <filter id="text-subtle-depth">
+      <feDropShadow dx="0" dy="2" stdDeviation="1.5" flood-color="#60080B" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- 1. 气泡主体：大圆角 + 平滑小尾巴 + 微渐变 + 投影 -->
+  <path d="M 54 60
+           H 202
+           A 16 16 0 0 1 218 76
+           V 168
+           A 16 16 0 0 1 202 184
+           H 178
+           Q 176 184 176 187
+           V 201
+           Q 176 207 170 204
+           L 138 187
+           Q 133 184 126 184
+           H 54
+           A 16 16 0 0 1 38 168
+           V 76
+           A 16 16 0 0 1 54 60 Z"
+        fill="url(#bg-gradient)"
+        filter="url(#fluent-shadow)"
+        stroke="url(#edge-highlight)"
+        stroke-width="1.5" />
+
+  <!-- 2. 字母 “IT”：右移 5px 进行视觉光学平衡，左右重量感达成均等 -->
+  <path d="M 73 80 h 26 v 84 H 73 Z
+           M 111 80 h 82 v 28 h -27 v 56 h -28 v -56 h -27 Z"
+        fill="#FFFFFF"
+        filter="url(#text-subtle-depth)" />
+</svg>
