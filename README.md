@@ -160,3 +160,4 @@
 2. **定位与非商用**：本项目所有网络通信均基于公开网络协议进行，仅作为面向 Windows 桌面的本地数据显示与排版工具；构建产物供个人免费学习与日常阅读，请勿用于任何商业营利。
 3. **权利人通道**：若相关权利人认为本项目涉及侵权，请通过反馈渠道联系，维护者核实后将第一时间积极配合修改或下线相应功能。
 4. **开源致谢**：本项目基于 Windows App SDK、CommunityToolkit、FluentIcons、HtmlAgilityPack 等开源项目构建，感谢开源社区的无私贡献。
+5. **灵感致谢**：[Richasy](https://github.com/Richasy) 的 Windows 应用作品（[哔哩助理](https://github.com/Richasy/Bili.Copilot)、[小幻影视](https://github.com/Richasy/Rodel.Player.Public)）在界面组织、文档结构与工程实践上为本项目提供了大量灵感与参考，特此致谢。
