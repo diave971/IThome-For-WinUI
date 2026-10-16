@@ -34,6 +34,7 @@ param(
     [string]$CertificatePassword = "",
     [string]$TimestampUrl = "",
     [switch]$SkipPortable,
+    [switch]$SkipSetup,
     [switch]$SkipMsix
 )
 
@@ -73,6 +74,23 @@ function Find-SignTool {
     $found = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Sort-Object -Unique
     if (-not $found) { return $null }
     return $found[-1]
+}
+
+# 从 PATH 或标准安装目录定位 Inno Setup 编译器 ISCC.exe
+function Find-InnoSetupCompiler {
+    $cmd = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+    if ($cmd -and (Test-Path -LiteralPath $cmd.Source)) {
+        return $cmd.Source
+    }
+    $candidates = @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path -LiteralPath $c) { return $c }
+    }
+    return $null
 }
 
 # 把源码树的 Assets 逐文件补齐到 publish 产物中缺失的位置。
@@ -151,6 +169,7 @@ $summary = [ordered]@{
     Publisher  = $publisher
     OutputDir  = $OutputDir
     Portable   = ""
+    Setup      = ""
     Msix       = ""
     MsixSigned = $false
 }
@@ -241,10 +260,72 @@ if (-not $SkipPortable) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::CreateFromDirectory(
         $stageRoot, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
-
-    Remove-Item -LiteralPath $stageRoot -Recurse -Force
     $summary.Portable = $zipPath
     Write-Host ("    {0} ({1:N1} MB)" -f (Split-Path -Leaf $zipPath), ((Get-Item $zipPath).Length / 1MB))
+
+    if (-not $SkipSetup) {
+        $iscc = Find-InnoSetupCompiler
+        if ($iscc) {
+            Write-Step "Building single-file setup installer ($Platform)"
+            $issPath = Join-Path $OutputDir "installer-$Platform.iss"
+            $archAllowed = if ($Platform -eq "ARM64") { "arm64" } else { "x64compatible" }
+            $iconFile = Join-Path $portableDir "Assets\appicon.ico"
+            $iconDirective = if (Test-Path -LiteralPath $iconFile) { "SetupIconFile=$iconFile" } else { "" }
+
+            $issContent = @"
+[Setup]
+AppId={{8E6B3A92-4C1F-4A9E-9D72-6A15E9C21B40}
+AppName=IT之家
+AppVersion=$Version
+AppPublisher=ITHome Community
+DefaultDirName={autopf}\ITHomeWinUI
+DefaultGroupName=IT之家
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+ArchitecturesAllowed=$archAllowed
+ArchitecturesInstallIn64BitMode=$archAllowed
+OutputDir=$OutputDir
+OutputBaseFilename=$artifactBase-setup
+Compression=lzma2/fast
+SolidCompression=yes
+WizardStyle=modern
+CloseApplications=force
+RestartApplications=yes
+UninstallDisplayIcon={app}\ITHomeWinUI.exe
+$iconDirective
+
+[Tasks]
+Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加任务:"
+
+[Files]
+Source: "$portableDir\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{autoprograms}\IT之家"; Filename: "{app}\ITHomeWinUI.exe"
+Name: "{autodesktop}\IT之家"; Filename: "{app}\ITHomeWinUI.exe"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\ITHomeWinUI.exe"; Description: "启动 IT之家"; Flags: nowait postinstall skipifsilent
+"@
+            Set-Content -LiteralPath $issPath -Value $issContent -Encoding UTF8
+            & $iscc "/Q" $issPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "ISCC.exe failed with exit code $LASTEXITCODE"
+            }
+            Remove-Item -LiteralPath $issPath -Force -ErrorAction SilentlyContinue
+            $setupPath = Join-Path $OutputDir "$artifactBase-setup.exe"
+            if (-not (Test-Path -LiteralPath $setupPath)) {
+                throw "Setup installer was not generated: $setupPath"
+            }
+            $summary.Setup = $setupPath
+            Write-Host ("    {0} ({1:N1} MB)" -f (Split-Path -Leaf $setupPath), ((Get-Item $setupPath).Length / 1MB))
+        }
+        else {
+            Write-Warning "Inno Setup (ISCC.exe) not found on this machine; skipping *-setup.exe generation."
+        }
+    }
+
+    Remove-Item -LiteralPath $stageRoot -Recurse -Force
 }
 
 # ---------------------------------------------------------------------------
@@ -363,6 +444,7 @@ $resultPath = Join-Path $OutputDir "release-summary.json"
     platform   = $Platform
     publisher  = $publisher
     portable   = if ($summary.Portable) { Split-Path -Leaf $summary.Portable } else { "" }
+    setup      = if ($summary.Setup) { Split-Path -Leaf $summary.Setup } else { "" }
     msix       = if ($summary.Msix) { Split-Path -Leaf $summary.Msix } else { "" }
     msixSigned = $summary.MsixSigned
 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $resultPath -Encoding UTF8

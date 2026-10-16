@@ -274,6 +274,7 @@ jobs:
           name: release-${{ inputs.source_ref }}-${{ github.run_number }}
           path: |
             release-output/**/*.zip
+            release-output/**/*-setup.exe
             release-output/**/*.msix
             release-output/**/SHA256SUMS.txt
           if-no-files-found: error
@@ -285,7 +286,7 @@ jobs:
         run: |
           Write-Host "本次 publish_release=false（试跑），按要求不上传安装包工件。"
           Get-ChildItem "release-output" -Recurse -File |
-            Where-Object { $_.Extension -in @('.zip', '.msix') } |
+            Where-Object { $_.Extension -in @('.zip', '.exe', '.msix') } |
             ForEach-Object { Write-Host ("  已就地验证未上传: {0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB)) }
 
       - name: 组装 Release 附件
@@ -297,7 +298,7 @@ jobs:
 
           # 注意：PowerShell 不会展开 "**"，必须用 Get-ChildItem 递归收集。
           Get-ChildItem "release-output" -Recurse -File |
-            Where-Object { $_.Extension -in @(".zip", ".msix") -or $_.Name -eq "SHA256SUMS.txt" } |
+            Where-Object { $_.Extension -in @(".zip", ".exe", ".msix") -or $_.Name -eq "SHA256SUMS.txt" } |
             ForEach-Object { Copy-Item $_.FullName $stage -Force }
 
           $certAvailable = "${{ steps.cert.outputs.available }}" -eq "true"
@@ -321,6 +322,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($version)) { throw "无法读取版本号" }
 
           $certAvailable = "${{ steps.cert.outputs.available }}" -eq "true"
+          $hasSetup = @(Get-ChildItem "release-assets" -Filter "*-setup.exe" -File).Count -gt 0
           $hasMsix = @(Get-ChildItem "release-assets" -Filter "*.msix" -File).Count -gt 0
 
           $lines = @()
@@ -344,10 +346,15 @@ jobs:
           $lines += ""
           $lines += "| 安装方式 | 文件 | 说明 |"
           $lines += "| --- | --- | --- |"
-          $lines += "| 绿色版（推荐） | ``*-portable.zip`` | 解压后直接运行 ``ITHomeWinUI.exe``，无需安装任何依赖 |"
-          if ($hasMsix) {
-            $lines += "| MSIX 安装版 | ``*.msix`` | 需先信任随附的 ``ITHomeWinUI-signing.cer`` 证书，再双击安装 |"
+          if ($hasSetup) {
+            $lines += "| 单文件安装版（推荐） | ``*-setup.exe`` | 双击直接安装（无需导入证书、无需管理员权限），自动创建开始菜单/桌面快捷方式与系统卸载项，支持应用内一键自更新 |"
           }
+          $lines += "| 绿色便携版（推荐） | ``*-portable.zip`` | 解压到任意可写目录后直接运行 ``ITHomeWinUI.exe``，无需安装任何依赖，同样支持应用内一键自更新与异常回滚 |"
+          if ($hasMsix) {
+            $lines += "| MSIX 安装版 | ``*.msix`` | 首次安装需先信任随附的 ``ITHomeWinUI-signing.cer`` 证书，之后支持应用内一键更新 |"
+          }
+          $lines += ""
+          $lines += "请按系统架构选择 x64 或 ARM64。"
           $lines += ""
 
           if ($certAvailable) {
@@ -357,20 +364,20 @@ jobs:
             $lines += "2. 存储位置选 **本地计算机** → 放入 **受信任的根证书颁发机构**"
             $lines += "3. 双击 ``.msix`` 完成安装"
             $lines += ""
-            $lines += "> 跳过第 2 步会导致安装因证书链错误失败。"
+            $lines += "> 跳过第 2 步会导致安装因证书链错误失败。若不便修改系统信任设置，请直接使用**单文件安装版（``*-setup.exe``）**或**绿色便携版（``*-portable.zip``）**。"
             $lines += ""
           }
           elseif ($hasMsix) {
-            $lines += "> **注意**：本次 MSIX 未签名，无法直接安装，仅供排查使用。请改用绿色版。"
+            $lines += "> **注意**：本次 MSIX 未签名，无法直接安装，仅供排查使用。请改用单文件安装版或绿色便携版。"
             $lines += ""
           }
 
           $lines += "### 完整性校验"
           $lines += ""
-          $lines += "所有附件均已在 ``SHA256SUMS.txt`` 中列出哈希，可用以下命令核对："
+          $lines += "所有附件均已在 ``SHA256SUMS.txt`` 中列出哈希（应用内自更新也会自动校验 SHA-256），可用以下命令手动核对："
           $lines += ""
           $lines += '```powershell'
-          $lines += 'Get-FileHash .\ITHomeWinUI-*-portable.zip -Algorithm SHA256'
+          $lines += 'Get-FileHash .\ITHomeWinUI-* -Algorithm SHA256'
           $lines += '```'
           $lines += ""
           $lines += "### 系统要求"
