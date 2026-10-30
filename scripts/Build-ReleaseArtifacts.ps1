@@ -205,6 +205,7 @@ if (-not $SkipPortable) {
         "-p:RuntimeIdentifier=$runtimeIdentifier" `
         "-p:Version=$Version" `
         "-p:FileVersion=$Version" `
+        "-p:PublishReadyToRun=true" `
         "-p:DebugType=none" `
         "-p:DebugSymbols=false" `
         -o $portableDir
